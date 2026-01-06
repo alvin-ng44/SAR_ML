@@ -4,7 +4,10 @@ data/
 
 # Python
 __pycache__/
+*.pyc
+
 .ipynb_checkpoints/
+*.ipynb~
 
 # Envs
 #.env
