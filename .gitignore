@@ -1,0 +1,11 @@
+# Data
+data/
+*.nc
+
+# Python
+__pycache__/
+.ipynb_checkpoints/
+
+# Envs
+#.env
+#.venv
