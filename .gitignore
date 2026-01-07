@@ -1,6 +1,5 @@
 # Data
 data/
-*.nc
 
 # Python
 __pycache__/
