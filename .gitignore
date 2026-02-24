@@ -1,5 +1,9 @@
 # Data
-data/
+data/SAMPLE/mat_files
+data/SAMPLE/png_images
+data/README.md
+data/sample_public.pdf
+data/verify.py
 
 # Python
 __pycache__/
