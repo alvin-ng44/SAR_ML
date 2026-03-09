@@ -1,9 +1,8 @@
+import re
+import copy
 import numpy as np
 import scipy.io
 import torch
-import numba as nb
-from numba import cuda
-import cupy as cp
 from sklearn.mixture import GaussianMixture
 from skimage.exposure import match_histograms
 
@@ -47,21 +46,21 @@ class LogMapping:
             log_mapped: Log-mapped intensity [0, 1] as numpy array
         """
         # Get magnitude
-        magnitude = cp.abs(complex_data)
+        magnitude = np.abs(complex_data)
         
         mag_min = magnitude.min()
         mag_max = magnitude.max()
         
         # Min-max normalization to [0, 1]
         if mag_max == mag_min:
-            A = cp.zeros_like(magnitude, dtype=np.float32)
+            A = np.zeros_like(magnitude, dtype = np.float32)
         else:
             A = (magnitude - mag_min) / (mag_max - mag_min)
         
         # Apply log mapping formula
-        I = cp.log10(1 + self.c * A) / cp.log10(1 + self.c)
+        I = np.log10(1 + self.c * A) / np.log10(1 + self.c)
         
-        return cp.asnumpy(I).astype(np.float32)
+        return I.astype(np.float32)
 
 #######################################################################################
 ################ GAUSSIAN NOISE #######################################################
@@ -70,38 +69,40 @@ class GaussianNoise:
     """
     adds Gaussian noise to data
     """
-    def __init__(self, mu = 0.0, sigma = 3.0):
+    def __init__(self, mu = 0.0, sigma = 0.3):
         self.mu = mu
         self.sigma = sigma
     def __call__(self, numpy_array):
-        image_cp = cp.array(numpy_array)
-        noise = cp.random.normal(loc = self.mu, scale = self.sigma, size = image_cp.shape)
-        I_noise = image_cp + noise
+        noise = np.random.normal(loc = self.mu, scale = self.sigma, size = numpy_array.shape)
+        I_noise = numpy_array + noise
     
         # DO NOT clip here - values can go outside [0, 1]
-        return cp.asnumpy(I_noise).astype(np.float32)
+        return I_noise.astype(np.float32)
 
 #######################################################################################
 ################# SSR #################################################################
 
 class SSRAugmentation:
     """SSR augmentation - combines your GMM code with randomization."""
-    def __init__(self, alpha=0.6, beta=0.4, sigma_s=0.3, apply_prob=0.5):
+    def __init__(self, alpha=0.6, beta=0.4, apply_prob=0.5, gaussian_noise = True, mu_s = 0.0, sigma_s = 0.3):
         self.alpha = alpha
         self.beta = beta
-        self.sigma_s = sigma_s
         self.apply_prob = apply_prob
+        self.gaussian_noise = gaussian_noise
+        self.mu_s = mu_s
+        self.sigma_s = sigma_s
     
-    def __call__(self, log_mapped_image):
-        if np.random.random() > self.apply_prob:
-            return log_mapped_image
+    def __call__(self, processed_image):
+
+        
+        if np.random.random() >= self.apply_prob:
+            return processed_image
         
         # Import your existing GMM function
         
         # Fit GMM (your existing code)
-        image_flat = log_mapped_image.flatten().reshape(-1, 1)
-        gmm = GaussianMixture(n_components=3, covariance_type='full', 
-                             max_iter=100, n_init=10)
+        image_flat = processed_image.flatten().reshape(-1, 1)
+        gmm = GaussianMixture(n_components = 3, covariance_type = 'full', max_iter = 100, n_init = 50)
         gmm.fit(image_flat)
         
         means = gmm.means_.flatten()
@@ -113,10 +114,14 @@ class SSRAugmentation:
         theta_C2 = {'mu': means[sorted_idx[1]], 'sigma': stds[sorted_idx[1]], 'pi': weights[sorted_idx[1]]}
         theta_T = {'mu': means[sorted_idx[2]], 'sigma': stds[sorted_idx[2]], 'pi': weights[sorted_idx[2]]}
         
-        # SSR Steps 2-3 (add noise, randomize, histogram match)
-        noise = np.random.normal(0, self.sigma_s, log_mapped_image.shape)
-        I_noise = log_mapped_image + noise
+        # SSR Steps 2-3 (add gaussian noise, randomize, histogram match)
         
+        if self.gaussian_noise:
+            _noise = GaussianNoise(self.mu_s, self.sigma_s)
+            I_noise = _noise(processed_image)
+        else:
+            I_noise = processed_image
+
         delta_mu = np.random.uniform(-self.alpha, self.alpha)
         delta_sigma = np.random.uniform(-self.beta, self.beta)
         
@@ -131,7 +136,7 @@ class SSRAugmentation:
             'pi': theta_C2['pi']
         }
         
-        n_pixels = log_mapped_image.size
+        n_pixels = processed_image.size
         n_C1 = int(theta_C1_new['pi'] * n_pixels)
         n_C2 = int(theta_C2_new['pi'] * n_pixels)
         n_T = n_pixels - n_C1 - n_C2
@@ -142,7 +147,7 @@ class SSRAugmentation:
         
         all_samples = np.concatenate([samples_C1, samples_C2, samples_T])
         np.random.shuffle(all_samples)
-        I_sampled = all_samples.reshape(log_mapped_image.shape)
+        I_sampled = all_samples.reshape(processed_image.shape)
         
         I_rand = match_histograms(I_noise, I_sampled)
         return np.clip(I_rand, 0.0, 1.0).astype(np.float32)
