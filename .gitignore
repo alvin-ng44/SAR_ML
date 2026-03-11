@@ -5,6 +5,7 @@ data/README.md
 data/sample_public.pdf
 data/verify.py
 data/SAMPLE/alvin_edited_files/log_mapping_global
+data/MSTAR
 
 # Python
 __pycache__/
@@ -18,3 +19,5 @@ __pycache__/
 #.venv
 
 papers/
+
+notebooks/SSR/lightning_logs
