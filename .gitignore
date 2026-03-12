@@ -21,3 +21,5 @@ __pycache__/
 papers/
 
 notebooks/SSR/lightning_logs
+
+weights/
