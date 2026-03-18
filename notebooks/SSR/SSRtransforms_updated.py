@@ -2,6 +2,7 @@ import re
 import copy
 import numpy as np
 import scipy.io
+from scipy.ndimage import uniform_filter, binary_closing, label
 import torch
 from sklearn.mixture import GaussianMixture
 from skimage.exposure import match_histograms
@@ -9,6 +10,8 @@ from pathlib import Path
 from tqdm import tqdm
 from torchvision.datasets import DatasetFolder
 from typing import Any, Tuple
+
+# Experiment 1: Custom DatasetFolder + Transformations for SSR augmentation.
 
 ####################################################################################
 ################### CUSTOM .MAT FILE LOADER ########################################
@@ -291,3 +294,53 @@ def filter_by_elev(dataset, allowed_angles):
     ds_cp.imgs = filtered
     ds_cp.targets = [label for _, label in filtered]
     return ds_cp
+
+# Experiment 2: Choi segmenation
+
+# step 0: to get I_v
+def readjust_intensity(image):
+    return image / image.sum()
+
+# step 1
+def find_target_and_shadow_mask(image_step0):
+    target_step1 = np.where(image_step0 >= np.percentile(image_step0, 97), 1, 0)
+    shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, 25), 1, 0)
+    return target_step1, shadow_step1
+
+# step 2
+def counting_filter(mask, window_size = 5, threshold = 15):
+    neighbor_count = uniform_filter(mask.astype(float), size = window_size) * (window_size ** 2)
+    return np.where(neighbor_count >= threshold, 1, 0)
+
+# step 3 
+def structing_ele(shape = 5):
+    ele = np.ones((shape, shape))
+    ele[0, 0] = 0
+    ele[0, -1] = 0
+    ele[-1, 0] = 0
+    ele[-1, -1] = 0
+    return ele
+def morphological_closing(mask, structuring_element = structing_ele(shape = 5)):
+    return binary_closing(mask, structure = structuring_element).astype(bool)
+
+# step 4
+def find_largest_connected_component(mask):
+    labeled_array, num_features = label(mask)
+    if num_features == 0:
+        return np.zeros_like(mask)
+    largest_component = np.argmax(np.bincount(labeled_array.flat)[1:]) + 1
+    return (labeled_array == largest_component).astype(int)
+
+# step 5
+def mask_to_intensity(mask, image_step0):
+    return mask * image_step0
+
+def choi_segmentation(image):
+    image_step0 = readjust_intensity(image)
+    target_step1, shadow_step1 = find_target_and_shadow_mask(image_step0)
+    target_step2, shadow_step2 = counting_filter(target_step1), counting_filter(shadow_step1)
+    target_step3, shadow_step3 = morphological_closing(target_step2), morphological_closing(shadow_step2)
+    target_step4, shadow_step4 = find_largest_connected_component(target_step3), find_largest_connected_component(shadow_step3)
+    clutter = 1 - (target_step4 + shadow_step4)
+    # target_step5, shadow_step5 = mask_to_intensity(target_step4, image_step0), mask_to_intensity(shadow_step4, image_step0)
+    return target_step4, shadow_step4, clutter
