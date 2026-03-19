@@ -82,7 +82,7 @@ class Magnitude:
             filepath = None
             pass_along = False
             
-        magnitude = np.abs(complex_data).astype(np.float32)
+        magnitude = np.abs(complex_data)
         
         return (magnitude, filepath) if pass_along else magnitude
 
@@ -122,7 +122,7 @@ class LogMapping:
             A = (magnitude - mag_min) / (mag_max - mag_min)
         
         # Apply log mapping formula
-        I = np.log10(1 + self.c * A) / np.log10(1 + self.c)
+        I = np.log10(1 + (self.c * A)) / np.log10(1 + self.c)
         result = I.astype(np.float32)
         
         return (result, filepath) if pass_along else result
@@ -327,7 +327,8 @@ def readjust_intensity(image):
 
 # step 1
 def find_target_and_shadow_mask(image_step0):
-    target_step1 = np.where(image_step0 >= np.percentile(image_step0, 97), 1, 0)
+    # target_step1 = np.where(image_step0 >= np.percentile(image_step0, 97), 1, 0)
+    target_step1 = np.where(image_step0 >= np.percentile(image_step0, 90), 1, 0)
     shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, 25), 1, 0)
     return target_step1, shadow_step1
 
@@ -345,7 +346,7 @@ def structing_ele(shape = 5):
     ele[-1, -1] = 0
     return ele
 def morphological_closing(mask, structuring_element = structing_ele(shape = 5)):
-    return binary_closing(mask, structure = structuring_element).astype(bool)
+    return binary_closing(mask, structure = structuring_element).astype(int)
 
 # step 4
 def find_largest_connected_component(mask):
@@ -362,8 +363,8 @@ def mask_to_intensity(mask, image_step0):
 def choi_segmentation(image):
     image_step0 = readjust_intensity(image)
     target_step1, shadow_step1 = find_target_and_shadow_mask(image_step0)
-    target_step2, shadow_step2 = counting_filter(target_step1), counting_filter(shadow_step1)
-    target_step3, shadow_step3 = morphological_closing(target_step2), morphological_closing(shadow_step2)
+    target_step2, shadow_step2 = counting_filter(target_step1, window_size = 5, threshold = 15), counting_filter(shadow_step1, window_size = 5, threshold = 15)
+    target_step3, shadow_step3 = morphological_closing(target_step2, structuring_element = structing_ele(shape = 5)), morphological_closing(shadow_step2, structuring_element = structing_ele(shape = 5))
     target_step4, shadow_step4 = find_largest_connected_component(target_step3), find_largest_connected_component(shadow_step3)
     clutter = 1 - (target_step4 + shadow_step4)
     # target_step5, shadow_step5 = mask_to_intensity(target_step4, image_step0), mask_to_intensity(shadow_step4, image_step0)
