@@ -60,22 +60,18 @@ class DatasetFolderWithPath(DatasetFolder):
 #####################################################################################
 
 #####################################################################################
-################### LOG MAPPING #####################################################
+################### MAGNITUDE #######################################################
 
-class LogMapping:
+class Magnitude:
     """
-    Transform: Load .mat file complex data and apply log mapping.
-    Combines your open_mat_file() and apply_log_mapping() functions.
+    Transform: extract magnitude.
     """
-    def __init__(self, c = 1000.0):
-        self.c = c
-    
     def __call__(self, complex_data_or_tuple):
         """
         Args:
             complex_data: Complex numpy array from .mat file
         Returns:
-            log_mapped: Log-mapped intensity [0, 1] as numpy array
+            magnitude: Magnitude as numpy array
         """
         # Handle both: raw image OR (image, filepath) tuple
         if isinstance(complex_data_or_tuple, tuple):
@@ -86,8 +82,35 @@ class LogMapping:
             filepath = None
             pass_along = False
             
-        # Get magnitude
-        magnitude = np.abs(complex_data)
+        magnitude = np.abs(complex_data).astype(np.float32)
+        
+        return (magnitude, filepath) if pass_along else magnitude
+
+#####################################################################################
+################### LOG MAPPING #####################################################
+
+class LogMapping:
+    """
+    Transform: apply log mapping.
+    """
+    def __init__(self, c = 1000.0):
+        self.c = c
+    
+    def __call__(self, magnitude_data_or_tuple):
+        """
+        Args:
+            magnitude_data: Magnitude numpy array
+        Returns:
+            log_mapped: Log-mapped intensity [0, 1] as numpy array
+        """
+        # Handle both: raw image OR (image, filepath) tuple
+        if isinstance(magnitude_data_or_tuple, tuple):
+            magnitude, filepath = magnitude_data_or_tuple
+            pass_along = True
+        else:
+            magnitude = magnitude_data_or_tuple
+            filepath = None
+            pass_along = False
         
         mag_min = magnitude.min()
         mag_max = magnitude.max()
@@ -163,7 +186,8 @@ def build_gmm_cache(input_dir, processing_func = LogMapping(c = 1000.0)):
 
     for mat_file in tqdm(mat_files,  desc = "Fitting GMMs" ):
         complex_img = mat_file_loader(str(mat_file))
-        processed_img = processing_func(complex_img)
+        magnitude_img = Magnitude()(complex_img)
+        processed_img = processing_func(magnitude_img)
         
         gmm_paras = fit_gmm_for_image(processed_img)
 
