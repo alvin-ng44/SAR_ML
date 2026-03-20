@@ -328,8 +328,9 @@ def readjust_intensity(image):
 # step 1
 def find_target_and_shadow_mask(image_step0):
     # target_step1 = np.where(image_step0 >= np.percentile(image_step0, 97), 1, 0)
-    target_step1 = np.where(image_step0 >= np.percentile(image_step0, 90), 1, 0)
-    shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, 25), 1, 0)
+    target_step1 = np.where(image_step0 >= np.percentile(image_step0, 85), 1, 0)
+    # shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, 25), 1, 0)
+    shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, 30), 1, 0)
     return target_step1, shadow_step1
 
 # step 2
