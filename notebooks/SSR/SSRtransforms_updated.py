@@ -1,5 +1,7 @@
 import re
 import copy
+import os
+import random
 import numpy as np
 import scipy.io
 from scipy.ndimage import uniform_filter, binary_closing, label
@@ -8,6 +10,7 @@ from sklearn.mixture import GaussianMixture
 from skimage.exposure import match_histograms
 from pathlib import Path
 from tqdm import tqdm
+from torchvision import datasets, transforms
 from torchvision.datasets import DatasetFolder
 from typing import Any, Tuple
 
@@ -318,8 +321,39 @@ def filter_by_elev(dataset, allowed_angles):
     ds_cp.imgs = filtered
     ds_cp.targets = [label for _, label in filtered]
     return ds_cp
+###########################################################################################
+################## Experiment 2: Choi segmenation #########################################
+###########################################################################################
 
-# Experiment 2: Choi segmenation
+# read mstar dataset to get complex image
+def read_mstar_clutter_complex(filepath):
+    with open(filepath, 'rb') as f:
+        raw = f.read()
+    
+    header_length = int(raw[:2000].decode('ascii', errors='ignore')
+                        .split('PhoenixHeaderLength=')[1].split()[0])
+    header = raw[:header_length].decode('ascii', errors='ignore')
+    lines = header.splitlines()
+    
+    def get_field(name):
+        return [l for l in lines if name in l][0].split('=')[1].strip()
+    
+    rows = int(get_field('NumberOfRows'))
+    cols = int(get_field('NumberOfColumns'))
+    native_header_length = int(get_field('native_header_length'))
+    
+    data_offset = header_length + native_header_length
+    n_pixels = rows * cols
+    
+    data = np.frombuffer(raw[data_offset:], dtype='>u2')
+    magnitude = data[:n_pixels].reshape(rows, cols).astype(np.float32)
+    phase     = data[n_pixels:2*n_pixels].reshape(rows, cols).astype(np.float32)
+    
+    # reconstruct complex from polar form
+    complex_data = magnitude * np.exp(1j * phase)
+    
+    return complex_data
+
 
 # step 0: to get I_v
 def readjust_intensity(image):
@@ -370,3 +404,88 @@ def choi_segmentation(image):
     clutter = 1 - (target_step4 + shadow_step4)
     # target_step5, shadow_step5 = mask_to_intensity(target_step4, image_step0), mask_to_intensity(shadow_step4, image_step0)
     return target_step4, shadow_step4, clutter
+
+def random_clutter_crop(clutter_image, crop_size=128, 
+                         zero_threshold=0.9, shadow_threshold=0.3,
+                         max_attempts=100):
+    H, W = clutter_image.shape
+    for _ in range(max_attempts):
+        r = np.random.randint(0, H - crop_size)
+        c = np.random.randint(0, W - crop_size)
+        crop = clutter_image[r:r+crop_size, c:c+crop_size]
+        # reject dead zones
+        if (crop > 0).mean() < zero_threshold:
+            continue
+        # reject shadow-dominated regions (too many low value pixels)
+        if (crop < np.percentile(clutter_image, 25)).mean() > shadow_threshold:
+            continue
+        return crop, r, c
+    raise ValueError("Could not find valid clutter crop")
+
+def build_clutter_cache(meas_ds_w_path, clutter_dir, crop_size=128):
+    """
+    For each measured image, preassign a random clutter crop location.
+    Returns dict: {filepath: {clutter_file, row_start, col_start}}
+    (row_end and col_end are just start + crop_size so no need to store them)
+    """
+    clutter_cache = {}
+    
+    # load all clutter files into RAM
+    clutter_files = [
+        os.path.join(clutter_dir, f)
+        for f in os.listdir(clutter_dir)
+    ]
+    
+    rand_clutter_ls = random.choices(clutter_files, k = len(meas_ds_w_path))
+
+    for idx, file in enumerate(tqdm(rand_clutter_ls, desc = "Building clutter cache")):
+        C_full_complex = read_mstar_clutter_complex(file)
+        C_full = Magnitude()(C_full_complex)
+        C_full_log = LogMapping(c = 1000.0)(C_full)
+        C, r, c = random_clutter_crop(C_full_log, 
+                                crop_size = crop_size, 
+                                zero_threshold = 0.9, 
+                                shadow_threshold = 0.3, 
+                                max_attempts = 100)
+        abs_path = str(Path(meas_ds_w_path.samples[idx][0]).resolve())
+        clutter_cache[abs_path] = (file, r, c)
+    return clutter_cache
+
+class Scenario2Merging:
+    def __init__(self, clutter_cache, crop_size = 128, c = 1000.0):
+        self.clutter_cache = clutter_cache
+        self.crop_size = crop_size
+        self.log_mapper = LogMapping(c = c)
+    
+    def __call__(self, img_or_tuple):
+        if isinstance(img_or_tuple, tuple):
+            I_meas, filepath = img_or_tuple
+        else:
+            return img_or_tuple
+
+        abs_path = str(Path(filepath).resolve())
+        if abs_path not in self.clutter_cache.keys():
+            print(f"WARNING: {filepath} not in clutter cache!")
+            return I_meas
+        
+        clutter_file, r, c = self.clutter_cache[abs_path]
+        clutter_complex = read_mstar_clutter_complex(clutter_file)
+        clutter_raw = Magnitude()(clutter_complex)
+        clutter_log = self.log_mapper(clutter_raw)
+        
+        # crop — just array slicing, very fast
+        C = clutter_log[r:r + self.crop_size, c:c + self.crop_size]
+        
+        # choi segmentation + merge
+        M_target, M_shadow, M_clutter = choi_segmentation(I_meas)
+        
+        clutter_sum = M_clutter.sum()
+        if clutter_sum == 0:
+            return (I_meas, filepath)
+        
+        C_bar      = (C * M_clutter).sum() / clutter_sum
+        I_meas_bar = (I_meas * M_clutter).sum() / clutter_sum
+        d          = C_bar - I_meas_bar
+        
+        I_merged = (I_meas + d) * (M_target + M_shadow) + C * M_clutter
+        return (I_merged.astype(np.float32), filepath)
