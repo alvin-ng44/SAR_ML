@@ -488,4 +488,6 @@ class Scenario2Merging:
         d          = C_bar - I_meas_bar
         
         I_merged = (I_meas + d) * (M_target + M_shadow) + C * M_clutter
-        return (I_merged.astype(np.float32), filepath)
+        # I_merged = np.clip(I_merged, 0.0, 1.0).astype(np.float32)
+        I_merged = (I_merged).astype(np.float32)
+        return (I_merged, filepath)
