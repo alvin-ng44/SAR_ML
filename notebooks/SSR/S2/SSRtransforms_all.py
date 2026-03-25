@@ -488,6 +488,87 @@ class Scenario2Merging:
         d          = C_bar - I_meas_bar
         
         I_merged = (I_meas + d) * (M_target + M_shadow) + C * M_clutter
+        # I_merged = np.clip(I_merged, 0.0, 1.0).astype(np.float32)
+        I_merged = (I_merged).astype(np.float32)
+        return (I_merged, filepath)
+
+class Scenario2Merging_clipped:
+    def __init__(self, clutter_cache, crop_size = 128, c = 1000.0):
+        self.clutter_cache = clutter_cache
+        self.crop_size = crop_size
+        self.log_mapper = LogMapping(c = c)
+    
+    def __call__(self, img_or_tuple):
+        if isinstance(img_or_tuple, tuple):
+            I_meas, filepath = img_or_tuple
+        else:
+            return img_or_tuple
+
+        abs_path = str(Path(filepath).resolve())
+        if abs_path not in self.clutter_cache.keys():
+            print(f"WARNING: {filepath} not in clutter cache!")
+            return I_meas
+        
+        clutter_file, r, c = self.clutter_cache[abs_path]
+        clutter_complex = read_mstar_clutter_complex(clutter_file)
+        clutter_raw = Magnitude()(clutter_complex)
+        clutter_log = self.log_mapper(clutter_raw)
+        
+        # crop — just array slicing, very fast
+        C = clutter_log[r:r + self.crop_size, c:c + self.crop_size]
+        
+        # choi segmentation + merge
+        M_target, M_shadow, M_clutter = choi_segmentation(I_meas)
+        
+        clutter_sum = M_clutter.sum()
+        if clutter_sum == 0:
+            return (I_meas, filepath)
+        
+        C_bar      = (C * M_clutter).sum() / clutter_sum
+        I_meas_bar = (I_meas * M_clutter).sum() / clutter_sum
+        d          = C_bar - I_meas_bar
+        
+        I_merged = (I_meas + d) * (M_target + M_shadow) + C * M_clutter
         I_merged = np.clip(I_merged, 0.0, 1.0).astype(np.float32)
         # I_merged = (I_merged).astype(np.float32)
+        return (I_merged, filepath)
+
+class Scenario2Merging_og:
+    def __init__(self, clutter_cache, crop_size = 128, c = 1000.0):
+        self.clutter_cache = clutter_cache
+        self.crop_size = crop_size
+        self.log_mapper = LogMapping(c = c)
+    
+    def __call__(self, img_or_tuple):
+        if isinstance(img_or_tuple, tuple):
+            I_meas, filepath = img_or_tuple
+        else:
+            return img_or_tuple
+
+        abs_path = str(Path(filepath).resolve())
+        if abs_path not in self.clutter_cache.keys():
+            print(f"WARNING: {filepath} not in clutter cache!")
+            return I_meas
+        
+        clutter_file, r, c = self.clutter_cache[abs_path]
+        clutter_complex = read_mstar_clutter_complex(clutter_file)
+        clutter_raw = Magnitude()(clutter_complex)
+        clutter_log = self.log_mapper(clutter_raw)
+        
+        # crop — just array slicing, very fast
+        C = clutter_log[r:r + self.crop_size, c:c + self.crop_size]
+        
+        # choi segmentation + merge
+        M_target, M_shadow, M_clutter = choi_segmentation(I_meas)
+        
+        clutter_sum = M_clutter.sum()
+        if clutter_sum == 0:
+            return (I_meas, filepath)
+        
+        C_bar      = (C * M_clutter).sum() / clutter_sum
+        I_meas_bar = (I_meas * M_clutter).sum() / clutter_sum
+        d          = C_bar - I_meas_bar
+        
+        I_merged = (I_meas + d) * M_target + I_meas * M_shadow + C * M_clutter
+        I_merged = (I_merged).astype(np.float32)
         return (I_merged, filepath)
