@@ -422,26 +422,24 @@ def random_clutter_crop(clutter_image, crop_size=128,
         return crop, r, c
     raise ValueError("Could not find valid clutter crop")
 
-def build_clutter_cache(meas_ds_w_path, clutter_dir, crop_size=128):
+def build_clutter_cache(meas_ds_w_path, clutter_dir, preloaded = None, crop_size=128):
     """
     For each measured image, preassign a random clutter crop location.
     Returns dict: {filepath: {clutter_file, row_start, col_start}}
     (row_end and col_end are just start + crop_size so no need to store them)
     """
-    clutter_cache = {}
-    
-    # load all clutter files into RAM
-    clutter_files = [
+    clutter_files = list(preloaded.keys()) if preloaded else [
         os.path.join(clutter_dir, f)
         for f in os.listdir(clutter_dir)
+        if os.path.isfile(os.path.join(clutter_dir, f))
     ]
+
+    clutter_cache = {}
     
     rand_clutter_ls = random.choices(clutter_files, k = len(meas_ds_w_path))
 
     for idx, file in enumerate(tqdm(rand_clutter_ls, desc = "Building clutter cache")):
-        C_full_complex = read_mstar_clutter_complex(file)
-        C_full = Magnitude()(C_full_complex)
-        C_full_log = LogMapping(c = 1000.0)(C_full)
+        C_full_log = preloaded[file] if preloaded else LogMapping(c=1000.0)(Magnitude()(read_mstar_clutter_complex(file)))
         C, r, c = random_clutter_crop(C_full_log, 
                                 crop_size = crop_size, 
                                 zero_threshold = 0.9, 
@@ -452,8 +450,9 @@ def build_clutter_cache(meas_ds_w_path, clutter_dir, crop_size=128):
     return clutter_cache
 
 class Scenario2Merging:
-    def __init__(self, clutter_cache, crop_size = 128, c = 1000.0):
+    def __init__(self, clutter_cache, preloaded = None, crop_size = 128, c = 1000.0):
         self.clutter_cache = clutter_cache
+        self.preloaded = preloaded
         self.crop_size = crop_size
         self.log_mapper = LogMapping(c = c)
     
@@ -469,9 +468,13 @@ class Scenario2Merging:
             return I_meas
         
         clutter_file, r, c = self.clutter_cache[abs_path]
-        clutter_complex = read_mstar_clutter_complex(clutter_file)
-        clutter_raw = Magnitude()(clutter_complex)
-        clutter_log = self.log_mapper(clutter_raw)
+
+        if self.preloaded and clutter_file in self.preloaded:
+            clutter_log = self.preloaded[clutter_file]
+        else:
+            clutter_complex = read_mstar_clutter_complex(clutter_file)
+            clutter_raw = Magnitude()(clutter_complex)
+            clutter_log = self.log_mapper(clutter_raw)
         
         # crop — just array slicing, very fast
         C = clutter_log[r:r + self.crop_size, c:c + self.crop_size]
