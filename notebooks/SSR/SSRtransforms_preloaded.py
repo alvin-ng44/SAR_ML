@@ -12,6 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 from torchvision import datasets, transforms
 from torchvision.datasets import DatasetFolder
+from torch.utils.data import Subset, Dataset
 from typing import Any, Tuple
 
 # Experiment 1: Custom DatasetFolder + Transformations for SSR augmentation.
@@ -57,6 +58,26 @@ class DatasetFolderWithPath(DatasetFolder):
             target = self.target_transform(target)
         
         return sample, target
+
+class RemappedSubset(Dataset):
+    def __init__(self, dataset, exclude_label):
+        # Filter indices
+        self.dataset = dataset
+        self.indices = [i for i, (_, label) in enumerate(dataset.samples)
+                        if label != exclude_label]
+        
+        # Build remap: old label -> new label
+        remaining_labels = sorted(set(label for _, label in dataset.samples) 
+                                  - {exclude_label})
+        self.label_map = {old: new for new, old in enumerate(remaining_labels)}
+        # e.g. exclude 5: {0:0, 1:1, 2:2, 3:3, 4:4, 6:5, 7:6, 8:7, 9:8}
+
+    def __getitem__(self, idx):
+        image, label = self.dataset[self.indices[idx]]
+        return image, self.label_map[label]  # remap here
+
+    def __len__(self):
+        return len(self.indices)
 
 #####################################################################################
 ################### TRANSFORMATIONS #################################################
