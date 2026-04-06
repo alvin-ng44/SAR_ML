@@ -1,11 +1,5 @@
 # Data
-data/SAMPLE/mat_files
-data/SAMPLE/png_images
-data/README.md
-data/sample_public.pdf
-data/verify.py
-data/SAMPLE/alvin_edited_files/log_mapping_global
-data/MSTAR
+data/
 
 # Python
 __pycache__/
