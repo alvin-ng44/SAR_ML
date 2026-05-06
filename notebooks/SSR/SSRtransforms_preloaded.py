@@ -409,11 +409,11 @@ def readjust_intensity(image):
     return image / image.sum()
 
 # step 1
-def find_target_and_shadow_mask(image_step0):
+def find_target_and_shadow_mask(image_step0, high = 85, low = 30):
     # target_step1 = np.where(image_step0 >= np.percentile(image_step0, 97), 1, 0)
-    target_step1 = np.where(image_step0 >= np.percentile(image_step0, 85), 1, 0)
+    target_step1 = np.where(image_step0 >= np.percentile(image_step0, high), 1, 0)
     # shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, 25), 1, 0)
-    shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, 30), 1, 0)
+    shadow_step1 = np.where(image_step0 <= np.percentile(image_step0, low), 1, 0)
     return target_step1, shadow_step1
 
 # step 2
@@ -444,9 +444,9 @@ def find_largest_connected_component(mask):
 def mask_to_intensity(mask, image_step0):
     return mask * image_step0
 
-def choi_segmentation(image):
+def choi_segmentation(image, high = 85, low = 30):
     image_step0 = readjust_intensity(image)
-    target_step1, shadow_step1 = find_target_and_shadow_mask(image_step0)
+    target_step1, shadow_step1 = find_target_and_shadow_mask(image_step0, high = high, low = low)
     target_step2, shadow_step2 = counting_filter(target_step1, window_size = 5, threshold = 15), counting_filter(shadow_step1, window_size = 5, threshold = 15)
     target_step3, shadow_step3 = morphological_closing(target_step2, structuring_element = structing_ele(shape = 5)), morphological_closing(shadow_step2, structuring_element = structing_ele(shape = 5))
     target_step4, shadow_step4 = find_largest_connected_component(target_step3), find_largest_connected_component(shadow_step3)
@@ -543,3 +543,48 @@ class Scenario2Merging:
         I_merged = np.clip(I_merged, 0.0, 1.0).astype(np.float32)
         # I_merged = (I_merged).astype(np.float32)
         return (I_merged, filepath)
+
+##########################################################################################
+#################### Training on Segmented Images ########################################
+
+# identity mapping: no augmentations
+identity = lambda x: x
+
+class MaskedAugmentation:
+    """
+    Computes Choi segmentation mask on the pre-augmentation image,
+    applies augmentation, then masks the result to target+shadow only.
+    
+    Pipeline: log_mapped_img → compute mask → aug → apply mask
+    
+    Args:
+        augmentation: SSRAugmentation, GaussianNoise, or any transform
+                      that accepts (image, filepath) tuples
+    """
+    def __init__(self, augmentation):
+        self.aug = augmentation
+
+    def __call__(self, img_or_tuple):
+        if isinstance(img_or_tuple, tuple):
+            image, filepath = img_or_tuple
+        else:
+            # Can't segment without filepath context; passthrough
+            return img_or_tuple
+
+        # Step 1: compute mask on ORIGINAL log-mapped image
+        M_target, M_shadow, _ = choi_segmentation(image, high = 95, low = 25)
+        mask = (M_target + M_shadow)   # binary, {0, 1}
+
+        # Step 2: apply augmentation
+        aug_result = self.aug((image, filepath))
+
+        # Step 3: unpack (aug may return tuple or bare array)
+        if isinstance(aug_result, tuple):
+            aug_image, fp = aug_result
+        else:
+            aug_image, fp = aug_result, filepath
+
+        # Step 4: apply mask — zero out clutter region
+        masked = (aug_image * mask).astype(np.float32)
+
+        return (masked, fp)
