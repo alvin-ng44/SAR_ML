@@ -561,8 +561,9 @@ class MaskedAugmentation:
         augmentation: SSRAugmentation, GaussianNoise, or any transform
                       that accepts (image, filepath) tuples
     """
-    def __init__(self, augmentation):
+    def __init__(self, augmentation, fill=np.mean):
         self.aug = augmentation
+        self.fill = fill
 
     def __call__(self, img_or_tuple):
         if isinstance(img_or_tuple, tuple):
@@ -577,14 +578,16 @@ class MaskedAugmentation:
 
         # Step 2: apply augmentation
         aug_result = self.aug((image, filepath))
-
-        # Step 3: unpack (aug may return tuple or bare array)
-        if isinstance(aug_result, tuple):
-            aug_image, fp = aug_result
+        aug_image = aug_result[0] if isinstance(aug_result, tuple) else aug_result
+        fp = aug_result[1] if isinstance(aug_result, tuple) else filepath
+        
+        # Step 3: apply mask + fill using augmented image statistics
+        if mask.any():
+            target_shadow_pixels = aug_image[mask == 1]
+            fill_val = self.fill(target_shadow_pixels) if callable(self.fill) else float(self.fill)
         else:
-            aug_image, fp = aug_result, filepath
+            fill_val = 0.0
 
-        # Step 4: apply mask — zero out clutter region
-        masked = (aug_image * mask).astype(np.float32)
+        result = aug_image * mask + fill_val * (1 - mask)
 
-        return (masked, fp)
+        return (result.astype(np.float32), fp)
