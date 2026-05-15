@@ -547,47 +547,47 @@ class Scenario2Merging:
 ##########################################################################################
 #################### Training on Segmented Images ########################################
 
-# identity mapping: no augmentations
-identity = lambda x: x
+# # identity mapping: no augmentations
+# identity = lambda x: x
 
-class MaskedAugmentation:
-    """
-    Computes Choi segmentation mask on the pre-augmentation image,
-    applies augmentation, then masks the result to target+shadow only.
+# class MaskedAugmentation:
+#     """
+#     Computes Choi segmentation mask on the pre-augmentation image,
+#     applies augmentation, then masks the result to target+shadow only.
     
-    Pipeline: log_mapped_img → compute mask → aug → apply mask
+#     Pipeline: log_mapped_img → compute mask → aug → apply mask
     
-    Args:
-        augmentation: SSRAugmentation, GaussianNoise, or any transform
-                      that accepts (image, filepath) tuples
-    """
-    def __init__(self, augmentation, fill=np.mean):
-        self.aug = augmentation
-        self.fill = fill
+#     Args:
+#         augmentation: SSRAugmentation, GaussianNoise, or any transform
+#                       that accepts (image, filepath) tuples
+#     """
+#     def __init__(self, augmentation, fill=np.mean):
+#         self.aug = augmentation
+#         self.fill = fill
 
-    def __call__(self, img_or_tuple):
-        if isinstance(img_or_tuple, tuple):
-            image, filepath = img_or_tuple
-        else:
-            # Can't segment without filepath context; passthrough
-            return img_or_tuple
+#     def __call__(self, img_or_tuple):
+#         if isinstance(img_or_tuple, tuple):
+#             image, filepath = img_or_tuple
+#         else:
+#             # Can't segment without filepath context; passthrough
+#             return img_or_tuple
 
-        # Step 1: compute mask on ORIGINAL log-mapped image
-        M_target, M_shadow, _ = choi_segmentation(image, high = 95, low = 25)
-        mask = (M_target + M_shadow)   # binary, {0, 1}
+#         # Step 1: compute mask on ORIGINAL log-mapped image
+#         M_target, M_shadow, _ = choi_segmentation(image, high = 95, low = 25)
+#         mask = (M_target + M_shadow)   # binary, {0, 1}
 
-        # Step 2: apply augmentation
-        aug_result = self.aug((image, filepath))
-        aug_image = aug_result[0] if isinstance(aug_result, tuple) else aug_result
-        fp = aug_result[1] if isinstance(aug_result, tuple) else filepath
+#         # Step 2: apply augmentation
+#         aug_result = self.aug((image, filepath))
+#         aug_image = aug_result[0] if isinstance(aug_result, tuple) else aug_result
+#         fp = aug_result[1] if isinstance(aug_result, tuple) else filepath
         
-        # Step 3: apply mask + fill using augmented image statistics
-        if mask.any():
-            target_shadow_pixels = aug_image[mask == 1]
-            fill_val = self.fill(target_shadow_pixels) if callable(self.fill) else float(self.fill)
-        else:
-            fill_val = 0.0
+#         # Step 3: apply mask + fill using augmented image statistics
+#         if mask.any():
+#             target_shadow_pixels = aug_image[mask == 1]
+#             fill_val = self.fill(target_shadow_pixels) if callable(self.fill) else float(self.fill)
+#         else:
+#             fill_val = 0.0
 
-        result = aug_image * mask + fill_val * (1 - mask)
+#         result = aug_image * mask + fill_val * (1 - mask)
 
-        return (result.astype(np.float32), fp)
+#         return (result.astype(np.float32), fp)
