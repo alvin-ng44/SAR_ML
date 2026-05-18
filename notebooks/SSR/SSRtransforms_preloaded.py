@@ -3,18 +3,32 @@ import copy
 import os
 import random
 import numpy as np
+import cupy as cp
+
 import scipy.io
 from scipy.ndimage import uniform_filter, binary_closing, label
-import torch
-import torch.nn as nn
 from sklearn.mixture import GaussianMixture
+
 from skimage.exposure import match_histograms
 from pathlib import Path
 from tqdm import tqdm
+import pickle
+from joblib import Parallel, delayed
+from typing import Any, Tuple
+
+import torch
+import torch.nn as nn
 from torchvision import datasets, transforms
 from torchvision.datasets import DatasetFolder
 from torch.utils.data import Subset, Dataset, DataLoader
-from typing import Any, Tuple
+
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+
+from cuvs.distance import pairwise_distance # useful to plot all pairwise distances between two sets of features
+from cuvs.neighbors import brute_force
+from cuml.metrics import confusion_matrix
+from sklearn.metrics import ConfusionMatrixDisplay
 
 ####################################################################################
 #################### Set random seeds for reproducibility ##########################
@@ -545,49 +559,238 @@ class Scenario2Merging:
         return (I_merged, filepath)
 
 ##########################################################################################
-#################### Training on Segmented Images ########################################
+####################################### Distance #########################################
 
-# # identity mapping: no augmentations
-# identity = lambda x: x
+def _get_features_and_preds_from_model(model, dataset, device, seed):
+    """
+    parameters:
+    model: PyTorch model to extract features from
+    dataset: PyTorch Dataset to extract features for
+    device: torch.device to perform computations on
 
-# class MaskedAugmentation:
-#     """
-#     Computes Choi segmentation mask on the pre-augmentation image,
-#     applies augmentation, then masks the result to target+shadow only.
+    returns:
+    features: cupy array of shape (num_samples, feature_dim) containing extracted features
+    labels: cupy array of shape (num_samples,) containing corresponding actuallabels
+    preds: cupy array of shape (num_samples,) containing corresponding predicted labels
+    """
+    model = model.to(device)
+    model.eval()
+
+    feature_extractor = nn.Sequential(*list(model.children())[:-1])
+    feature_extractor = feature_extractor.to(device)
+    feature_extractor.eval()
+
+    features, labels_list, preds_list = [], [], []
+
+    with torch.no_grad():
+        for inputs, targets in tqdm(
+            DataLoader(
+            dataset, batch_size = 32, 
+            shuffle = False, num_workers = 8,
+            pin_memory = True, persistent_workers=True, 
+            worker_init_fn=worker_init_fn, generator=torch.Generator().manual_seed(seed)
+            ), leave = False):
+
+            inputs = inputs.to(device)
+
+            # features 
+            feats = feature_extractor(inputs)
+            feats = feats.view(feats.size(0), -1)
+            features.append(feats.cpu())
+
+            #softmax prediction
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            preds_list.append(preds.cpu())
+            
+            labels_list.append(targets)
+
+    features = torch.cat(features).numpy()
+    labels = torch.cat(labels_list).numpy()
+    preds = torch.cat(preds_list).numpy()
     
-#     Pipeline: log_mapped_img → compute mask → aug → apply mask
+    return cp.asarray(features), cp.asarray(labels), cp.asarray(preds)
+
+def k_nearest_neighbors(test_features, train_features, metric = "sqeuclidean", k = 5):
+    # returns k nearest squared L2 distances 
     
-#     Args:
-#         augmentation: SSRAugmentation, GaussianNoise, or any transform
-#                       that accepts (image, filepath) tuples
-#     """
-#     def __init__(self, augmentation, fill=np.mean):
-#         self.aug = augmentation
-#         self.fill = fill
+    index = brute_force.build(train_features, metric)
+    distances, neighbors = brute_force.search(index, test_features, k = k)
+    return cp.asarray(distances), cp.asarray(neighbors)
 
-#     def __call__(self, img_or_tuple):
-#         if isinstance(img_or_tuple, tuple):
-#             image, filepath = img_or_tuple
-#         else:
-#             # Can't segment without filepath context; passthrough
-#             return img_or_tuple
-
-#         # Step 1: compute mask on ORIGINAL log-mapped image
-#         M_target, M_shadow, _ = choi_segmentation(image, high = 95, low = 25)
-#         mask = (M_target + M_shadow)   # binary, {0, 1}
-
-#         # Step 2: apply augmentation
-#         aug_result = self.aug((image, filepath))
-#         aug_image = aug_result[0] if isinstance(aug_result, tuple) else aug_result
-#         fp = aug_result[1] if isinstance(aug_result, tuple) else filepath
+def plotting_neighbors(
+    test_ds,  preds, test_samples_array,
+    train_ds, neighbors_for_test_ds, neighbors_distances
+):
+    for test_sample in test_samples_array:
+        print("-" * 75)
+        # plottting test sample
+        fig = plt.figure(figsize = (8, 6))
+        ax = fig.add_subplot(111)
+        ax.imshow(test_ds[test_sample][0][0], cmap = "grey")
         
-#         # Step 3: apply mask + fill using augmented image statistics
-#         if mask.any():
-#             target_shadow_pixels = aug_image[mask == 1]
-#             fill_val = self.fill(target_shadow_pixels) if callable(self.fill) else float(self.fill)
-#         else:
-#             fill_val = 0.0
+        test_path, test_class = test_ds.samples[test_sample]
+        elev_re = re.search(r'elevDeg_(\d+)', test_path)
+        azim_re = re.search(r'azCenter_(\d+)', test_path)
 
-#         result = aug_image * mask + fill_val * (1 - mask)
+        elev = int(elev_re.group(1))
+        azim = int(azim_re.group(1))
 
-#         return (result.astype(np.float32), fp)
+        ax.set_title(f"Measured Sample {test_sample}")
+        ax.text(0, -0.1, f"Actual: {test_ds.classes[test_class]}", transform=ax.transAxes)
+        ax.text(0, -0.15, f"Predicted: {test_ds.classes[int(preds[test_sample])]}", transform=ax.transAxes)
+        ax.text(0, -0.2, rf"Elev: ${int(elev)}\degree$, Azim: ${int(azim)}\degree$", transform=ax.transAxes)
+        plt.show()
+
+        interested_neighbors = neighbors_for_test_ds[test_sample]
+        interested_distances = neighbors_distances[test_sample]
+        
+        fig = plt.figure(figsize=(6 * neighbors_for_test_ds.shape[1], 6))
+        for i in range(neighbors_for_test_ds.shape[1]):
+            ax = fig.add_subplot(1, neighbors_for_test_ds.shape[1], i + 1)
+            
+            train_idx = interested_neighbors[i]
+            ax.imshow(train_ds[int(train_idx)][0][0], cmap = "gray")
+            train_path, train_class = train_ds.samples[int(train_idx)]
+            elev_re = re.search(r'elevDeg_(\d+)', train_path)
+            azim_re = re.search(r'azCenter_(\d+)', train_path)
+        
+            elev = int(elev_re.group(1))
+            azim = int(azim_re.group(1))
+        
+            ax.set_title(f"Synth Neighbor {i+1}: Sample {int(train_idx)}")
+            ax.text(0, -0.1, f"Class: {train_ds.classes[train_class]}", transform=ax.transAxes)
+            ax.text(0, -0.15, rf"Elev: ${int(elev)}\degree$, Azim: ${int(azim)}\degree$", transform=ax.transAxes)
+            ax.text(0, -0.2, f"Distance: {interested_distances[i]:.4f}", transform=ax.transAxes)
+        plt.tight_layout()
+        plt.show()
+        print("-" * 75)
+
+def k_nearest_neighbors_by_true_class(
+    test_features, test_labels, 
+    train_features, train_labels, 
+    metric="sqeuclidean", k=5):
+    
+    test_features  = cp.asarray(test_features)
+    train_features = cp.asarray(train_features)
+    test_labels    = cp.asarray(test_labels)
+    train_labels   = cp.asarray(train_labels)
+    
+    num_classes = cp.unique(train_labels)
+    
+    all_distances = cp.zeros((len(test_features), k), dtype=train_features.dtype)
+    all_neighbors = cp.zeros((len(test_features), k), dtype=cp.int64)
+    
+    for c in num_classes:
+        # get training feature_ds for the knn index 
+        original_indices = cp.where(train_labels == c)[0]
+        class_features = train_features[original_indices]
+
+        # get test_ds who true class is class c
+        test_mask = test_labels == c
+        if not test_mask.any():
+            continue
+        test_feats_c = test_features[test_mask]
+        
+        # Build → search → done
+        index = brute_force.build(class_features, metric)
+        distances, neighbors = brute_force.search(index, test_feats_c, k=k)
+        cp.cuda.Stream.null.synchronize()  # explicit sync after search
+        
+        # Map filtered indices → original
+        original_neighbors = original_indices[neighbors]
+        
+        all_distances[test_mask] = distances
+        all_neighbors[test_mask] = original_neighbors
+    
+    return all_distances, all_neighbors
+
+def parse_metadata(path):
+    elev = re.search(r'elevDeg_(\d+)', path)
+    azim = re.search(r'azCenter_(\d+)', path)
+    return {
+        'elev': int(elev.group(1)) if elev else None,
+        'azim': int(azim.group(1)) if azim else None
+    }
+
+def azim_agreement_analysis_by_class(
+    meas_ds, test_labels, test_preds,
+    synth_ds, neighbors,
+    q_values=[5, 10, 15, 20, 30],
+    k = 5,
+    normalise = True
+):
+
+    correct_mask    = test_preds == test_labels
+    correct_indices = cp.where(correct_mask)[0]
+
+    # Parse azimuth upfront
+    test_azims  = cp.array([parse_metadata(p)['azim'] for p, _ in meas_ds.samples])
+    synth_azims = cp.array([parse_metadata(p)['azim'] for p, _ in synth_ds.samples])
+
+    top_k_neighbor_idx = neighbors[correct_indices, :k]
+    test_azim_vals  = test_azims[correct_indices]
+    synth_azim_vals = synth_azims[top_k_neighbor_idx]
+    azim_diffs      = cp.abs(test_azim_vals[:, None] - synth_azim_vals)
+    correct_classes = test_labels[correct_indices]
+
+    # Header
+    header = f"{'Class':<10}" + "".join([f"  q={q:>2}" for q in q_values])
+    print(header)
+    print("-" * len(header))
+
+    results = {}
+    for class_idx, class_name in enumerate(synth_ds.classes):
+        class_mask  = correct_classes == class_idx
+        class_diffs = azim_diffs[class_mask]
+        
+        if len(class_diffs) == 0:
+            continue
+
+        row = f"{class_name:<10}"
+        results[class_name] = {}
+        for q in q_values:
+
+            hits = (class_diffs <= q).any(axis = 1).sum()
+            frac = hits / len(class_diffs) if normalise else hits
+            row += f"  {frac:>5.3f}"
+            results[class_name][q] = frac
+
+        row += f"  (n={len(class_diffs)})"
+        print(row)
+
+    # Overall row
+    print("-" * len(header))
+    overall_row = f"{'Overall':<10}"
+    for q in q_values:
+
+        hits = (azim_diffs <= q).any(axis = 1).sum()
+        frac = hits / len(correct_indices) if normalise else hits
+        overall_row += f"  {frac:>5.3f}"
+    overall_row += f"  (n={len(correct_indices)})"
+    print(overall_row)
+
+    return results, azim_diffs
+
+# Plot per class histogram
+def plot_azim_diffs_by_class(meas_ds, azim_diffs, correct_classes):
+    k = azim_diffs.shape[1]  # infer k from array shape
+    
+    fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+    axes = axes.flatten()
+
+    for class_idx, class_name in enumerate(meas_ds.classes):
+        class_mask  = correct_classes == class_idx
+        class_diffs = azim_diffs[class_mask]  # (num_correct_c, k)
+
+        if k > 1:
+            class_diffs = class_diffs.flatten()  # (num_correct_c * k,)
+
+        axes[class_idx].hist(class_diffs, bins=20, edgecolor='black', color='steelblue')
+        axes[class_idx].set_title(class_name)
+        axes[class_idx].set_xlabel('|test_azim - synth_azim|')
+        axes[class_idx].set_ylabel('Count')
+
+    plt.suptitle(f'Azimuth difference by class (k={k} neighbours)')
+    plt.tight_layout()
+    plt.show()
