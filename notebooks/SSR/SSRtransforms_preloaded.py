@@ -6,10 +6,12 @@ import numpy as np
 import cupy as cp
 
 import scipy.io
-from scipy.ndimage import uniform_filter, binary_closing, label
+from scipy.ndimage import uniform_filter, binary_closing, binary_dilation, label, center_of_mass, distance_transform_edt
+from skimage.exposure import match_histograms
+from skimage.morphology import remove_small_objects
+import SimpleITK as sitk
 from sklearn.mixture import GaussianMixture
 
-from skimage.exposure import match_histograms
 from pathlib import Path
 from tqdm import tqdm
 import pickle
@@ -558,9 +560,119 @@ class Scenario2Merging:
         # I_merged = (I_merged).astype(np.float32)
         return (I_merged, filepath)
 
-##########################################################################################
-####################################### Distance #########################################
+###########################################################################################
+############################# Zhao_v2 segmenation #########################################
+###########################################################################################
 
+def anisotropic_diffusion(img, n_iter = 20, kappa = 0.1, gamma = 0.1):
+    img = img if isinstance(img, np.ndarray) else img.numpy()
+    sitk_img = sitk.GetImageFromArray(img.astype(np.float32))
+    filt = sitk.GradientAnisotropicDiffusionImageFilter()
+    filt.SetNumberOfIterations(n_iter)
+    filt.SetConductanceParameter(kappa)
+    filt.SetTimeStep(gamma)
+    result = filt.Execute(sitk_img)
+    return sitk.GetArrayFromImage(result)
+
+def filter_shadow_by_distance(shadow_mask, T_mask, T_D=10, min_shadow_size=20):
+    """
+    Improved shadow filtering:
+      1. remove_small_objects to eliminate tiny noise CCs
+      2. Accept CC if its CLOSEST pixel to the target boundary is within T_D
+         (boundary distance, not centroid-to-centroid distance)
+    """
+    # Step 1: remove small spurious CCs
+    cleaned = remove_small_objects(shadow_mask.astype(bool), min_size=min_shadow_size)
+    
+    # Step 2: compute distance transform from target boundary
+    # distance_transform_edt on the *inverted* target mask gives
+    # each pixel its distance to the nearest target pixel
+    dist_from_target = distance_transform_edt(1 - T_mask)
+    
+    labeled, n = label(cleaned)
+    if n == 0:
+        return np.zeros_like(shadow_mask)
+    
+    best_mask = np.zeros_like(shadow_mask)
+    
+    for region_id in range(1, n + 1):
+        region = (labeled == region_id)
+        # minimum distance from any pixel in this CC to the target boundary
+        min_dist = dist_from_target[region].min()
+        if min_dist < T_D:
+            best_mask |= region
+    
+    return best_mask
+
+def zhao_segmentation_v2(img):
+    I_pm = anisotropic_diffusion(img)
+    I_n = readjust_intensity(I_pm)
+    T_b, S_b = find_target_and_shadow_mask(I_n, high = 90, low = 35)
+    T_c, S_c = counting_filter(T_b, window_size = 5, threshold = 15), counting_filter(S_b, window_size = 5, threshold = 15)
+    T_dilated, S_closing = binary_dilation(T_c, structure = structing_ele(shape = 5)).astype(int), binary_closing(S_c, structure = structing_ele(shape = 5)).astype(int)
+    
+    T_mask = find_largest_connected_component(T_dilated)
+    if T_mask.sum() == 0:
+        zeros = np.zeros(img.shape, dtype=int)
+        return zeros, zeros, np.ones(img.shape, dtype=int)
+
+    S_mask = filter_shadow_by_distance(S_closing, T_mask, T_D=5, min_shadow_size=20)
+
+    clutter = 1 - (T_mask + S_mask)
+    return T_mask, S_mask, clutter
+
+# identity mapping: no augmentations
+identity = lambda x: x
+
+class MaskedAugmentation:
+    """
+    Computes Zhao_v2 segmentation mask on the pre-augmentation image,
+    applies augmentation, then masks the result to target+shadow only.
+    
+    Pipeline: log_mapped_img → compute mask → aug → apply mask
+    
+    Args:
+        augmentation: SSRAugmentation, GaussianNoise, or any transform
+                      that accepts (image, filepath) tuples
+    """
+    def __init__(self, augmentation, fill=np.mean, mask_cache=None):
+        self.aug = augmentation
+        self.fill = fill
+        self.mask_cache = mask_cache
+
+    def __call__(self, img_or_tuple):
+        if isinstance(img_or_tuple, tuple):
+            image, filepath = img_or_tuple
+        else:
+            # Can't segment without filepath context; passthrough
+            return img_or_tuple
+    
+        # Use cached mask if available, else compute on the fly
+        if self.mask_cache is not None and filepath in self.mask_cache:
+            mask = self.mask_cache[filepath].astype(np.float32)
+        else:
+            M_target, M_shadow, _ = zhao_segmentation_v2(image)
+            mask = (M_target + M_shadow).astype(np.float32)
+
+        # Step 2: apply augmentation
+        aug_result = self.aug((image, filepath))
+        aug_image = aug_result[0] if isinstance(aug_result, tuple) else aug_result
+        fp = aug_result[1] if isinstance(aug_result, tuple) else filepath
+        
+        # Step 3: apply mask + fill using augmented image statistics
+        if mask.any():
+            target_shadow_pixels = aug_image[mask == 1]
+            fill_val = self.fill(target_shadow_pixels) if callable(self.fill) else float(self.fill)
+        else:
+            fill_val = 0.0
+
+        result = aug_image * mask + fill_val * (1 - mask)
+
+        return (result.astype(np.float32), fp)
+
+###########################################################################################
+####################################### Distance ##########################################
+###########################################################################################
 def _get_features_and_preds_from_model(model, dataset, device, seed):
     """
     parameters:
