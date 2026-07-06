@@ -17,6 +17,7 @@ from tqdm import tqdm
 import pickle
 from joblib import Parallel, delayed
 from typing import Any, Tuple
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
@@ -723,6 +724,52 @@ def _get_features_and_preds_from_model(model, dataset, device, seed):
     
     return cp.asarray(features), cp.asarray(labels), cp.asarray(preds)
 
+def _get_features_and_preds_from_mc_model(model, dataset, device, seed, k=1000):
+    model = model.to(device)
+    model.eval()
+    for m in model.modules():
+        if isinstance(m, nn.Dropout2d):
+            m.train()
+
+    n_samples = len(dataset)
+    features_tensor = torch.zeros((n_samples, 512), device=device)
+    labels_tensor   = torch.zeros(n_samples, dtype=torch.long, device=device)
+    preds_tensor    = torch.zeros(n_samples, dtype=torch.long, device=device)
+
+    hook = model.avgpool.register_forward_hook(
+        lambda m, inp, out: feats_buffer.append(out.view(out.size(0), -1))
+    )
+
+    idx = 0
+    feats_buffer = []
+    with torch.no_grad():
+        for inputs, targets in tqdm(
+            DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, 
+                    pin_memory=True, persistent_workers=True, prefetch_factor = 4,
+                    worker_init_fn=worker_init_fn, generator=torch.Generator().manual_seed(seed)),
+                    leave=False):
+
+            inputs  = inputs.to(device)
+            targets = targets.to(device)
+            feats_buffer.clear()
+
+            preds_mc = torch.stack([model(inputs) for _ in range(k)], dim=0)
+
+            bs = inputs.size(0)
+            features_tensor[idx:idx+bs] = torch.stack(feats_buffer, dim=0).mean(0)
+            labels_tensor[idx:idx+bs] = targets
+            preds_tensor[idx:idx+bs] = torch.softmax(preds_mc, dim=-1).mean(0).argmax(1)
+            idx += bs
+
+    hook.remove()
+    torch.cuda.synchronize()
+
+    _features = features_tensor.cpu().numpy()
+    _labels = labels_tensor.cpu().numpy()
+    _preds = preds_tensor.cpu().numpy()
+
+    return cp.asarray(_features), cp.asarray(_labels), cp.asarray(_preds)
+
 def k_nearest_neighbors(test_features, train_features, metric = "sqeuclidean", k = 5):
     # returns k nearest squared L2 distances 
     
@@ -906,3 +953,104 @@ def plot_azim_diffs_by_class(meas_ds, azim_diffs, correct_classes):
     plt.suptitle(f'Azimuth difference by class (k={k} neighbours)')
     plt.tight_layout()
     plt.show()
+
+####################################################################
+################### Azimuth level training #########################
+####################################################################
+
+def build_azimuth_bin_map(dataset, bin_width=10):
+    # --- Step 1: gather azimuth values per class ---
+    class_azims = defaultdict(list)
+    for path, label in dataset.samples:
+        az = parse_metadata(path)['azim']
+        if az is not None:
+            class_azims[label].append(az)
+
+    # --- Step 2: compute bin ranges per class ---
+    class_bin_info = {}
+    for label, azims in class_azims.items():
+        az_min = min(azims)
+        az_max = max(azims)
+        bin_start = (az_min // bin_width) * bin_width
+        bin_end   = (az_max // bin_width) * bin_width
+        bins = list(range(bin_start, bin_end + bin_width, bin_width))
+        class_bin_info[label] = {
+            'min'   : az_min,
+            'max'   : az_max,
+            'bins'  : bins,
+            'n_bins': len(bins),
+        }
+
+    # --- Step 3: compute global offset per class (last class first) ---
+    sorted_classes = sorted(class_bin_info.keys(), reverse=False)
+    offset = {}
+    cumulative = 0
+    for label in sorted_classes:
+        offset[label] = cumulative
+        cumulative += class_bin_info[label]['n_bins']
+    total_bins = cumulative
+
+    # --- Step 4: assign each sample a global bin index ---
+    sample_to_bin_idx = {}
+    for sample_idx, (path, label) in enumerate(dataset.samples):
+        az = parse_metadata(path)['azim']
+        if az is None:
+            continue
+        info = class_bin_info[label]
+        bin_start_for_az = (az // bin_width) * bin_width
+        local_bin = (bin_start_for_az - info['bins'][0]) // bin_width
+        sample_to_bin_idx[sample_idx] = offset[label] + local_bin
+
+    # --- Step 5: build new class name list indexed by new label ---
+    new_classes = [None] * total_bins
+    for label in sorted_classes:
+        info = class_bin_info[label]
+        vehicle = dataset.classes[label]
+        for local_bin, bin_lower in enumerate(info['bins']):
+            new_label = offset[label] + local_bin
+            new_classes[new_label] = f"{vehicle}_az{bin_lower}"
+
+    
+    new_to_old_classes = {}
+    for label in sorted_classes:
+        info = class_bin_info[label]
+        for local_bin in range(info['n_bins']):
+            new_label = offset[label] + local_bin
+            new_to_old_classes[new_label] = label
+
+    return sample_to_bin_idx, class_bin_info, total_bins, new_classes, new_to_old_classes
+
+
+def print_bin_summary(class_bin_info, dataset, bin_width=10):
+    print(f"{'Label':<6} {'Class':<20} {'Az range':<14} {'N_bins'}")
+    print("-" * 55)
+    for label in sorted(class_bin_info):
+        info = class_bin_info[label]
+        class_name = dataset.classes[label]
+        az_range = f"{info['min']} – {info['max']}"
+        print(f"{label:<6} {class_name:<20} {az_range:<14} {info['n_bins']}")
+    k = len(class_bin_info)
+    total = sum(v['n_bins'] for v in class_bin_info.values())
+    print("-" * 55)
+    print(f"k={k} classes, total bins = {total}  (= Σ N_i)")
+
+
+class AzimuthBinnedDataset(Dataset):
+    def __init__(self, dataset, sample_to_bin_idx, new_classes):
+        self.dataset = dataset
+        self.sample_to_bin_idx = sample_to_bin_idx
+        self.classes = new_classes
+        self.valid_indices = [i for i in range(len(dataset)) if i in sample_to_bin_idx]
+
+    def __len__(self):
+        return len(self.valid_indices)
+
+    def __getitem__(self, idx):
+        original_idx = self.valid_indices[idx]
+        image, _ = self.dataset[original_idx]
+        new_label = self.sample_to_bin_idx[original_idx]
+        return image, new_label
+
+    @property
+    def samples(self):
+        return [(self.dataset.samples[i][0], self.sample_to_bin_idx[i]) for i in self.valid_indices]
