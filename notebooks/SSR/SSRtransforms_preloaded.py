@@ -79,6 +79,11 @@ def mat_file_loader(path):
     mat_contents = scipy.io.loadmat(path)
     return mat_contents['complex_img']
 
+def dso_np_file_loader(path):
+    arr = np.load(path)
+    complex_arr = arr[:, :, 0] + 1j * arr[:, :, 1]
+    return complex_arr
+
 class DatasetFolderWithPath(DatasetFolder):
     """
     Minimal modification to DatasetFolder.
@@ -108,15 +113,39 @@ class RemappedSubset(Dataset):
     def __init__(self, dataset, exclude_label):
         # Filter indices
         self.dataset = dataset
+        
+        # Normalize to a set, whether given an int or a list/tuple/set
+        if isinstance(exclude_label, (list, tuple, set)):
+            exclude_labels = set(exclude_label)
+        else:
+            exclude_labels = {exclude_label}    
+        
         self.indices = [i for i, (_, label) in enumerate(dataset.samples)
-                        if label != exclude_label]
+                        if label not in exclude_labels]
         
         # Build remap: old label -> new label
         remaining_labels = sorted(set(label for _, label in dataset.samples) 
-                                  - {exclude_label})
+                                  - exclude_labels)
         self.label_map = {old: new for new, old in enumerate(remaining_labels)}
         # e.g. exclude 5: {0:0, 1:1, 2:2, 3:3, 4:4, 6:5, 7:6, 8:7, 9:8}
 
+        # Build class_to_idx and classes, remapped to new label indices
+        # dataset.class_to_idx: {class_name: new_idx}
+        self.class_to_idx = {
+            name: self.label_map[old_idx]
+            for name, old_idx in dataset.class_to_idx.items()
+            if old_idx in self.label_map
+        }
+        # classes ordered by new idx
+        self.classes = [None] * len(self.class_to_idx)
+        for name, new_idx in self.class_to_idx.items():
+            self.classes[new_idx] = name
+
+        self.samples = [
+            (dataset.samples[i][0], self.label_map[dataset.samples[i][1]])
+            for i in self.indices
+        ]
+        
     def __getitem__(self, idx):
         image, label = self.dataset[self.indices[idx]]
         return image, self.label_map[label]  # remap here
@@ -155,6 +184,34 @@ class Magnitude:
         
         return (magnitude, filepath) if pass_along else magnitude
 
+#####################################################################################
+################### CIRCULAR SHIFT ##################################################
+
+class CircularShift:
+
+    def __init__(self, shift_pixels = 10, axis = -1):
+        """
+        shift_pixels: positive = shift right, negative = shift left
+        axis: -1 for horizontal shift, -2 for vertical
+        """
+        self.shift_pixels = shift_pixels
+        self.axis = axis
+    
+    def __call__(self, magnitude_data_or_tuple):
+        
+        if isinstance(magnitude_data_or_tuple, tuple):
+            magnitude, filepath = magnitude_data_or_tuple
+            pass_along = True
+
+        else:
+            magnitude = magnitude_data_or_tuple
+            filepath = None
+            pass_along = False
+
+        result = np.roll(magnitude, shift = self.shift_pixels, axis = self.axis)
+        
+        return (result, filepath) if pass_along else result
+        
 #####################################################################################
 ################### LOG MAPPING #####################################################
 
@@ -387,6 +444,24 @@ def filter_by_elev(dataset, allowed_angles):
     ds_cp.imgs = filtered
     ds_cp.targets = [label for _, label in filtered]
     return ds_cp
+
+def extract_azimuth(path):
+    match = re.search(r"azCenter_(\d{3})", path)
+    if match:
+        return int(match.group(1))
+    return None
+
+def filter_by_azimuth(dataset, allowed_angles):
+    filtered = []
+    ds_cp = copy.deepcopy(dataset)
+    for path, label in dataset.samples:
+        azim = extract_azimuth(path)
+        if azim in allowed_angles:
+            filtered.append((path, label))
+    ds_cp.samples = filtered
+    ds_cp.imgs = filtered
+    ds_cp.targets = [label for _, label in filtered]
+    return ds_cp
 ###########################################################################################
 ################## Experiment 2: Choi segmenation #########################################
 ###########################################################################################
@@ -605,10 +680,10 @@ def filter_shadow_by_distance(shadow_mask, T_mask, T_D=10, min_shadow_size=20):
     
     return best_mask
 
-def zhao_segmentation_v2(img):
+def zhao_segmentation_v2(img, high_val = 90, low_val = 35):
     I_pm = anisotropic_diffusion(img)
     I_n = readjust_intensity(I_pm)
-    T_b, S_b = find_target_and_shadow_mask(I_n, high = 90, low = 35)
+    T_b, S_b = find_target_and_shadow_mask(I_n, high = high_val, low = low_val)
     T_c, S_c = counting_filter(T_b, window_size = 5, threshold = 15), counting_filter(S_b, window_size = 5, threshold = 15)
     T_dilated, S_closing = binary_dilation(T_c, structure = structing_ele(shape = 5)).astype(int), binary_closing(S_c, structure = structing_ele(shape = 5)).astype(int)
     
@@ -769,6 +844,57 @@ def _get_features_and_preds_from_mc_model(model, dataset, device, seed, k=1000):
     _preds = preds_tensor.cpu().numpy()
 
     return cp.asarray(_features), cp.asarray(_labels), cp.asarray(_preds)
+
+def _get_features_and_preds_from_LPD_model(model, dataset, device, seed):
+    """
+    parameters:
+    model: PyTorch model to extract features from
+    dataset: PyTorch Dataset to extract features for
+    device: torch.device to perform computations on
+
+    returns:
+    features: cupy array of shape (num_samples, feature_dim) containing extracted features
+    labels: cupy array of shape (num_samples,) containing corresponding actuallabels
+    preds: cupy array of shape (num_samples,) containing corresponding predicted labels
+    """
+    model = model.to(device)
+    model.eval()
+
+    feature_extractor = nn.Sequential(*list(model.core.children())[:-1])
+    feature_extractor = feature_extractor.to(device)
+    feature_extractor.eval()
+
+    features, labels_list, preds_list = [], [], []
+
+    with torch.no_grad():
+        for inputs, targets in tqdm(
+            DataLoader(
+            dataset, batch_size = 32, 
+            shuffle = False, num_workers = 8,
+            pin_memory = True, persistent_workers=True, 
+            worker_init_fn=worker_init_fn, generator=torch.Generator().manual_seed(seed)
+            ), leave = False):
+
+            inputs = inputs.to(device)
+
+            # features 
+            feats = feature_extractor(inputs)
+            feats = feats.view(feats.size(0), -1)
+            features.append(feats.cpu())
+
+            #softmax prediction
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            preds_list.append(preds.cpu())
+            
+            labels_list.append(targets)
+
+    features = torch.cat(features).numpy()
+    labels = torch.cat(labels_list).numpy()
+    preds = torch.cat(preds_list).numpy()
+    
+    return cp.asarray(features), cp.asarray(labels), cp.asarray(preds)
+
 
 def k_nearest_neighbors(test_features, train_features, metric = "sqeuclidean", k = 5):
     # returns k nearest squared L2 distances 
