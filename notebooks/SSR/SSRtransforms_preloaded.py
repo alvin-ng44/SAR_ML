@@ -4,6 +4,7 @@ import os
 import random
 import numpy as np
 import cupy as cp
+from tifffile import TiffFile
 
 import scipy.io
 from scipy.ndimage import uniform_filter, binary_closing, binary_dilation, label, center_of_mass, distance_transform_edt
@@ -83,6 +84,17 @@ def dso_np_file_loader(path):
     arr = np.load(path)
     complex_arr = arr[:, :, 0] + 1j * arr[:, :, 1]
     return complex_arr
+
+def dso_tiff_file_loader_fast(path):
+    with TiffFile(path) as tif:
+        arr = tif.pages[1].asarray().astype(np.complex128)  # slant_img page only
+    return arr[0] if arr.ndim == 3 else arr
+
+def dso_tiff_file_loader_fast_flipped(path):
+    with TiffFile(path) as tif:
+        arr = tif.pages[1].asarray().astype(np.complex128)
+    arr = arr[0] if arr.ndim == 3 else arr
+    return np.fliplr(arr)
 
 class DatasetFolderWithPath(DatasetFolder):
     """
@@ -183,6 +195,30 @@ class Magnitude:
         magnitude = np.abs(complex_data)
         
         return (magnitude, filepath) if pass_along else magnitude
+
+#####################################################################################
+################### CENTER CROP #####################################################
+
+class CenterCrop:
+    def __init__(self, target_size=128):
+        self.target_size = target_size
+
+    def __call__(self, data_or_tuple):
+        if isinstance(data_or_tuple, tuple):
+            data, filepath = data_or_tuple
+            pass_along = True
+        else:
+            data = data_or_tuple
+            filepath = None
+            pass_along = False
+
+        h, w = data.shape[-2:]
+        t = self.target_size
+        top = (h - t) // 2
+        left = (w - t) // 2
+        cropped = data[..., top:top + t, left:left + t]
+
+        return (cropped, filepath) if pass_along else cropped
 
 #####################################################################################
 ################### CIRCULAR SHIFT ##################################################
@@ -431,6 +467,9 @@ def extract_elev(path):
     match = re.search(r"elevDeg_(\d{3})", path)
     if match:
         return int(match.group(1))
+    match = re.search(r"gz(\d+)", path)
+    if match:
+        return int(match.group(1))
     return None
 
 def filter_by_elev(dataset, allowed_angles):
@@ -447,6 +486,9 @@ def filter_by_elev(dataset, allowed_angles):
 
 def extract_azimuth(path):
     match = re.search(r"azCenter_(\d{3})", path)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"asp(\d{3})", path)
     if match:
         return int(match.group(1))
     return None
