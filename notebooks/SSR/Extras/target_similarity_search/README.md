@@ -14,9 +14,9 @@ for selected measured samples.
 
 | Distance Metric | Top-N | ≤5°       | ≤10°      | ≤15°      | Notebook |
 |-------------------|:-----:|----------:|----------:|----------:|----------|
-| Cosine            | 1     | **20.9%** | **37.2%** | **53.1%** | [`L2_and_cosine.ipynb`](./L2_and_cosine.ipynb) |
+| Cosine            | 1     | 20.9% | 37.2% | 53.1% | [`L2_and_cosine.ipynb`](./L2_and_cosine.ipynb) |
 | L2                | 1     | 19.1%     | 34.9%     | 50.3%     | [`L2_and_cosine.ipynb`](./L2_and_cosine.ipynb) |
-| Cosine            | 5     | **52.1%** | **77.7%** | **85.2%** | [`L2_and_cosine.ipynb`](./L2_and_cosine.ipynb) |
+| Cosine            | 5     | 52.1% | 77.7% | 85.2% | [`L2_and_cosine.ipynb`](./L2_and_cosine.ipynb) |
 | L2                | 5     | 51.0%     | 69.6%     | 83.3%     | [`L2_and_cosine.ipynb`](./L2_and_cosine.ipynb) |
 
 ## Notes
