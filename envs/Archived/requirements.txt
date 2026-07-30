@@ -12,6 +12,7 @@ scikit-learn
 umap-learn
 lightning
 optuna
+simpleitk
 
 bayesian-torch
 pyro-ppl
