@@ -28,7 +28,7 @@ These notebooks reproduce the First Scenario from M. Kim et al., "Soft Segmented
 
 ### Target Similarity Search (TSS)
 
-For each Measured (17°) test chip, the 5 nearest neighbours (using Cosine distance) are retrieved from the Synthetic (14°/15°/16°) dataset. A chip is counted as a match if at least one of its five neighbours falls within a given azimuth angle threshold (1°, 3°, 5°) of the chip's true azimuth. Reported values are the percentage of test chips matched at each threshold.
+For each Measured (17°) test chip, the 5 nearest neighbours (using Cosine distance) are retrieved from the Synthetic (14°/15°/16°) dataset. A chip is counted as a match if at least one of its five neighbours falls within a given azimuth angle threshold (1°, 3°, 5°) of the chip's true azimuth. Reported values are the percentage of correctly classified test chips matched at each threshold.
 
 | Augmentation Method | ≤1°   | ≤3°   | ≤5° | Notebook |
 |----------------------|--------|--------|----------|----------|
