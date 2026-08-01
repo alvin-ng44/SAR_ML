@@ -464,7 +464,7 @@ class NumpyToTensor3Channel:
 ###########################################################################################
 
 def extract_elev(path):
-    match = re.search(r"elevDeg_(\d{3})", path)
+    match = re.search(r"elevDeg_(\d+)", path)
     if match:
         return int(match.group(1))
     match = re.search(r"gz(\d+)", path)
@@ -485,10 +485,10 @@ def filter_by_elev(dataset, allowed_angles):
     return ds_cp
 
 def extract_azimuth(path):
-    match = re.search(r"azCenter_(\d{3})", path)
+    match = re.search(r"azCenter_(\d+)", path)
     if match:
         return int(match.group(1))
-    match = re.search(r"asp(\d{3})", path)
+    match = re.search(r"asp(\d+)", path)
     if match:
         return int(match.group(1))
     return None
